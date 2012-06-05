@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 #
 # Copyright (C) 2012 Edgewall Software
+# Copyright (C) 2012 Peter Stuge <peter@stuge.se>
 # Copyright (C) 2006-2011, Herbert Valerio Riedel <hvr@gnu.org>
 # All rights reserved.
 #
@@ -33,7 +34,9 @@ from trac.versioncontrol.web_ui import IPropertyRenderer
 from trac.web.chrome import Chrome
 from trac.wiki import IWikiSyntaxProvider
 
-from tracopt.versioncontrol.git import PyGIT
+import pygit2
+import pkg_resources
+import itertools
 
 
 class GitCachedRepository(CachedRepository):
@@ -93,14 +96,12 @@ def intersperse(sep, iterable):
         yield item
 
 # helper
-def _parse_user_time(s):
-    """parse author/committer attribute lines and return
-    (user,timestamp)
-    """
-
-    user, time, tz_str = s.rsplit(None, 2)
-    tz = FixedOffset((int(tz_str)*6)/10, tz_str)
-    time = datetime.fromtimestamp(float(time), tz)
+def _user_time(s):
+    """return (user,timestamp) for a pygit2.Signature"""
+    user = '%s <%s>' % (s.name, s.email)
+    tz_str = '+' if s.offset >= 0 else '-'
+    tz_str += '%02d%02d' % (abs(s.offset) / 60, abs(s.offset) % 60)
+    time = datetime.fromtimestamp(float(s.time), FixedOffset(s.offset, tz_str))
     return user, time
 
 
@@ -109,21 +110,9 @@ class GitConnector(Component):
     implements(IRepositoryConnector, IWikiSyntaxProvider)
 
     def __init__(self):
-        self._version = None
-
-        try:
-            self._version = PyGIT.Storage.git_version(git_bin=self._git_bin)
-        except PyGIT.GitError, e:
-            self.log.error("GitError: " + str(e))
-
-        if self._version:
-            self.log.info("detected GIT version %s" % self._version['v_str'])
-            self.env.systeminfo.append(('GIT', self._version['v_str']))
-            if not self._version['v_compatible']:
-                self.log.error("GIT version %s installed not compatible"
-                               "(need >= %s)" %
-                               (self._version['v_str'],
-                                self._version['v_min_str']))
+        self._version = pkg_resources.get_distribution('pygit2').version
+        self.log.info("using pygit2 version %s" % self._version)
+        self.env.systeminfo.append(('PYGIT2', self._version))
 
     # IWikiSyntaxProvider methods
 
@@ -166,12 +155,6 @@ class GitConnector(Component):
 
     # IRepositoryConnector methods
 
-    _persistent_cache = BoolOption('git', 'persistent_cache', 'false',
-        """enable persistent caching of commit tree""")
-
-    _cached_repository = BoolOption('git', 'cached_repository', 'false',
-        """wrap `GitRepository` in `CachedRepository`""")
-
     _shortrev_len = IntOption('git', 'shortrev_len', 7,
         """length rev sha sums should be tried to be abbreviated to
         (must be >= 4 and <= 40)
@@ -195,12 +178,6 @@ class GitConnector(Component):
         as changeset timestamp
         """)
 
-    _git_fs_encoding = Option('git', 'git_fs_encoding', 'utf-8',
-        """define charset encoding of paths within git repository""")
-
-    _git_bin = PathOption('git', 'git_bin', '/usr/bin/git',
-        """path to git executable (relative to trac project folder!)""")
-
 
     def get_supported_types(self):
         yield ('git', 8)
@@ -216,12 +193,7 @@ class GitConnector(Component):
             raise TracError("wiki_shortrev_len must be withing [4..40]")
 
         if not self._version:
-            raise TracError("GIT backend not available")
-        elif not self._version['v_compatible']:
-            raise TracError("GIT version %s installed not compatible"
-                            "(need >= %s)" %
-                            (self._version['v_str'],
-                             self._version['v_min_str']))
+            raise TracError("pygit2 is not available")
 
         if self._trac_user_rlookup:
             def rlookup_uid(email):
@@ -249,23 +221,13 @@ class GitConnector(Component):
             def rlookup_uid(_):
                 return None
 
-        repos = GitRepository(dir, params, self.log,
-                              persistent_cache=self._persistent_cache,
-                              git_bin=self._git_bin,
-                              git_fs_encoding=self._git_fs_encoding,
-                              shortrev_len=self._shortrev_len,
-                              rlookup_uid=rlookup_uid,
-                              use_committer_id=self._use_committer_id,
-                              use_committer_time=self._use_committer_time,
-                              )
-
-        if self._cached_repository:
-            repos = GitCachedRepository(self.env, repos, self.log)
-            self.log.debug("enabled CachedRepository for '%s'" % dir)
-        else:
-            self.log.debug("disabled CachedRepository for '%s'" % dir)
-
-        return repos
+        return GitRepository(dir, params, self.log,
+                             persistent_cache=False,
+                             shortrev_len=self._shortrev_len,
+                             rlookup_uid=rlookup_uid,
+                             use_committer_id=self._use_committer_id,
+                             use_committer_time=self._use_committer_time,
+                             )
 
 
 class CsetPropertyRenderer(Component):
@@ -358,8 +320,6 @@ class GitRepository(Repository):
 
     def __init__(self, path, params, log,
                  persistent_cache=False,
-                 git_bin='git',
-                 git_fs_encoding='utf-8',
                  shortrev_len=7,
                  rlookup_uid=lambda _: None,
                  use_committer_id=False,
@@ -373,22 +333,34 @@ class GitRepository(Repository):
         self.rlookup_uid = rlookup_uid
         self._use_committer_time = use_committer_time
         self._use_committer_id = use_committer_id
-
-        self.git = PyGIT.StorageFactory(path, log, not persistent_cache,
-                                        git_bin=git_bin,
-                                        git_fs_encoding=git_fs_encoding) \
-                        .getInstance()
-
+        self.git = pygit2.Repository(path)
+        self.heads = [self.git.lookup_reference(ref).resolve() for ref in \
+                      self.git.listall_references() if \
+                      ref.startswith('refs/heads/')]
+        if not self.heads:
+            self.heads = [self.git.lookup_reference('HEAD').resolve()]
+        self.tags = [self.git.lookup_reference(ref).resolve() for ref in \
+                      self.git.listall_references() if \
+                      ref.startswith('refs/tags/')]
+        self.root = itertools.slice(self.git.walk(self.heads[0].oid,
+                                                  pygit2.GIT_SORT_TIME | \
+                                                  pygit2.GIT_SORT_REVERSE), 1)[0]
         Repository.__init__(self, 'git:'+path, self.params, log)
 
     def close(self):
         self.git = None
 
     def get_youngest_rev(self):
-        return self.git.youngest_rev()
+        time = 0
+        commit = None
+        for head in self.heads:
+            if self.git[head.oid].committer.time > time:
+                time = self.git[head.oid].committer.time
+                commit = head.hex
+        return commit
 
     def get_oldest_rev(self):
-        return self.git.oldest_rev()
+        return self.root.hex
 
     def normalize_path(self, path):
         return path and path.strip('/') or '/'
@@ -412,18 +384,20 @@ class GitRepository(Repository):
         return GitNode(self, path, rev, self.log, None, historian)
 
     def get_quickjump_entries(self, rev):
-        for bname, bsha in self.git.get_branches():
-            yield 'branches', bname, '/', bsha
-        for t in self.git.get_tags():
-            yield 'tags', t, '/', t
+        for h in self.heads:
+            yield 'branches', h.name, '/', h.hex
+        for t in self.tags:
+            yield 'tags', t.name, '/', t.hex
 
     def get_path_url(self, path, rev):
         return self.params.get('url')
 
     def get_changesets(self, start, stop):
-        for rev in self.git.history_timerange(to_timestamp(start),
-                                              to_timestamp(stop)):
-            yield self.get_changeset(rev)
+        for commit in self.git.walk(self.root.oid,
+                                    pygit2.GIT_SORT_TIME | \
+                                    pygit2.GIT_SORT_REVERSE):
+            if to_timestamp(start) <= commit.time <= to_timestamp(stop):
+                yield self.get_changeset(commit.hex)
 
     def get_changeset(self, rev):
         """GitChangeset factory method"""
@@ -499,42 +473,37 @@ class GitRepository(Repository):
 
 class GitNode(Node):
 
-    def __init__(self, repos, path, rev, log, ls_tree_info=None,
-                 historian=None):
+    def __init__(self, repos, path, rev, log):
         self.log = log
         self.repos = repos
-        self.fs_sha = None # points to either tree or blobs
-        self.fs_perm = None
-        self.fs_size = None
-        rev = rev and str(rev) or 'HEAD'
+        self.te = None
+        self.te_size = None
+        ref = repos.git.lookup_reference(rev or 'HEAD').resolve()
+        commit = repos.git[ref.oid]
 
         kind = Node.DIRECTORY
         p = path.strip('/')
         if p: # ie. not the root-tree
-            if not ls_tree_info:
-                ls_tree_info = repos.git.ls_tree(rev, p) or None
-                if ls_tree_info:
-                    [ls_tree_info] = ls_tree_info
-
-            if not ls_tree_info:
+            try:
+                self.te = commit.tree[p]
+            except:
                 raise NoSuchNode(path, rev)
-
-            self.fs_perm, k, self.fs_sha, self.fs_size, _ = ls_tree_info
+            self.te_size = len(repos.git[self.te.oid].data)
 
             # fix-up to the last commit-rev that touched this node
-            rev = repos.git.last_change(rev, p, historian)
+#            rev = repos.git.last_change(rev, p, historian)
 
-            if k == 'tree':
+            if self.te.type == pygit2.GIT_OBJ_TREE:
                 pass
-            elif k == 'commit':
+            elif self.te.type == pygit2.GIT_OBJ_COMMIT:
                 # FIXME: this is a workaround for missing git submodule
                 #        support in the plugin
                 pass
-            elif k == 'blob':
+            elif self.te.type == pygit2.GIT_OBJ_BLOB:
                 kind = Node.FILE
             else:
                 raise TracError("Internal error (got unexpected object " \
-                                "kind '%s')" % k)
+                                "type '%d')" % self.te.type)
 
         self.created_path = path
         self.created_rev = rev
@@ -556,10 +525,10 @@ class GitNode(Node):
         if not self.isfile:
             return None
 
-        return self.repos.git.get_file(self.fs_sha)
+        return self.repos.git[self.te.oid].data
 
     def get_properties(self):
-        return self.fs_perm and {'mode': self.fs_perm } or {}
+        return self.te.attributes and {'mode': self.te.attributes } or {}
 
     def get_annotations(self):
         if not self.isfile:
@@ -588,10 +557,10 @@ class GitNode(Node):
         if not self.isfile:
             return None
 
-        if self.fs_size is None:
-            self.fs_size = self.repos.git.get_obj_size(self.fs_sha)
+        if self.te_size is None:
+            self.te_size = len(self.repos.git[self.te.oid].data)
 
-        return self.fs_size
+        return self.te_size
 
     def get_history(self, limit=None):
         # TODO: find a way to follow renames/copies
@@ -606,7 +575,7 @@ class GitNode(Node):
 
         try:
             msg, props = self.repos.git.read_commit(self.rev)
-            user, ts = _parse_user_time(props['committer'][0])
+            user, ts = _user_time(props.committer)
         except:
             self.log.error("internal error (could not get timestamp from "
                            "commit '%s')" % self.rev)
@@ -633,58 +602,46 @@ class GitChangeset(Changeset):
     def __init__(self, repos, sha):
         if sha is None:
             raise NoSuchChangeset(sha)
-        
+
         try:
-            msg, props = repos.git.read_commit(sha)
-        except PyGIT.GitErrorSha:
+            self.props = repos.git[repos.git.lookup_reference(sha).resolve()]
+        except KeyError:
             raise NoSuchChangeset(sha)
 
-        self.props = props
+#        assert 'children' not in props
+#        _children = list(repos.git.children(sha))
+#        if _children:
+#            props['children'] = _children
 
-        assert 'children' not in props
-        _children = list(repos.git.children(sha))
-        if _children:
-            props['children'] = _children
-
-        # use 1st author/committer as changeset owner/timestamp
         if repos._use_committer_time:
-            _, time_ = _parse_user_time(props['committer'][0])
+            _, time_ = _user_time(props.committer)
         else:
-            _, time_ = _parse_user_time(props['author'][0])
+            _, time_ = _user_time(props.author)
 
         if repos._use_committer_id:
-            user_, _ = _parse_user_time(props['committer'][0])
+            user_, _ = _user_time(props.committer)
         else:
-            user_, _ = _parse_user_time(props['author'][0])
+            user_, _ = _user_time(props.author)
 
         # try to resolve email address to trac uid
         user_ = repos.rlookup_uid(user_) or user_
 
-        Changeset.__init__(self, repos, rev=sha, message=msg, author=user_,
-                           date=time_)
+        Changeset.__init__(self, repos, rev=sha, message=props.message,
+                           author=user_, date=time_)
 
     def get_properties(self):
         properties = {}
 
-        if 'parent' in self.props:
-            properties['Parents'] = self.props['parent']
+        if len(self.props.parents):
+            properties['Parents'] = [c.hex for c in self.props.parents]
 
-        if 'children' in self.props:
-            properties['Children'] = self.props['children']
+        if len(self.props.children):
+            properties['Children'] = [c.hex for c in self.props.children]
 
-        if 'committer' in self.props:
-            properties['git-committer'] = \
-                    _parse_user_time(self.props['committer'][0])
-
-        if 'author' in self.props:
-            properties['git-author'] = \
-                    _parse_user_time(self.props['author'][0])
-
-        branches = list(self.repos.git.get_branch_contains(self.rev,
-                                                           resolve=True))
-        if branches:
-            properties['Branches'] = branches
-
+        properties['git-committer'] = _user_time(self.props.committer)
+        properties['git-author'] = _user_time(self.props.author)
+        properties['Branches'] = [branch.name.split('refs/heads/', 1) \
+                                  for branch in heads]
         return properties
 
     def get_changes(self):
