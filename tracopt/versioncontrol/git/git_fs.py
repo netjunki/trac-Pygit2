@@ -490,37 +490,42 @@ class GitRepository(Repository):
 
 class GitNode(Node):
 
-    def __init__(self, repos, path, rev, log):
+    def __init__(self, repos, path, rev, log, ls_tree_info=None,
+                 historian=None):
         self.log = log
         self.repos = repos
-        self.te = None
-        self.te_size = None
-        ref = repos.git.lookup_reference(rev or 'HEAD').resolve()
-        commit = repos.git[ref.oid]
+        self.fs_sha = None # points to either tree or blobs
+        self.fs_perm = None
+        self.fs_size = None
+        rev = rev and str(rev) or 'HEAD'
 
         kind = Node.DIRECTORY
         p = path.strip('/')
         if p: # ie. not the root-tree
-            try:
-                self.te = commit.tree[p]
-            except:
+            if not ls_tree_info:
+                ls_tree_info = repos.git.ls_tree(rev, p) or None
+                if ls_tree_info:
+                    [ls_tree_info] = ls_tree_info
+
+            if not ls_tree_info:
                 raise NoSuchNode(path, rev)
-            self.te_size = len(repos.git[self.te.oid].data)
+
+            self.fs_perm, k, self.fs_sha, self.fs_size, _ = ls_tree_info
 
             # fix-up to the last commit-rev that touched this node
-#            rev = repos.git.last_change(rev, p, historian)
+            rev = repos.git.last_change(rev, p, historian)
 
-            if self.te.type == pygit2.GIT_OBJ_TREE:
+            if k == 'tree':
                 pass
-            elif self.te.type == pygit2.GIT_OBJ_COMMIT:
+            elif k == 'commit':
                 # FIXME: this is a workaround for missing git submodule
                 #        support in the plugin
                 pass
-            elif self.te.type == pygit2.GIT_OBJ_BLOB:
+            elif k == 'blob':
                 kind = Node.FILE
             else:
                 raise TracError("Internal error (got unexpected object " \
-                                "type '%d')" % self.te.type)
+                                "kind '%s')" % k)
 
         self.created_path = path
         self.created_rev = rev
@@ -542,10 +547,10 @@ class GitNode(Node):
         if not self.isfile:
             return None
 
-        return self.repos.git[self.te.oid].data
+        return self.repos.git.get_file(self.fs_sha)
 
     def get_properties(self):
-        return self.te.attributes and {'mode': self.te.attributes } or {}
+        return self.fs_perm and {'mode': self.fs_perm } or {}
 
     def get_annotations(self):
         if not self.isfile:
@@ -574,10 +579,10 @@ class GitNode(Node):
         if not self.isfile:
             return None
 
-        if self.te_size is None:
-            self.te_size = len(self.repos.git[self.te.oid].data)
+        if self.fs_size is None:
+            self.fs_size = self.repos.git.get_obj_size(self.fs_sha)
 
-        return self.te_size
+        return self.fs_size
 
     def get_history(self, limit=None):
         # TODO: find a way to follow renames/copies
@@ -592,14 +597,13 @@ class GitNode(Node):
 
         try:
             msg, props = self.repos.git.read_commit(self.rev)
-            user, ts = _user_time(props.committer)
+            user, ts = _parse_user_time(props['committer'][0])
         except:
             self.log.error("internal error (could not get timestamp from "
                            "commit '%s')" % self.rev)
             return None
 
         return ts
-
 
 class GitChangeset(Changeset):
     """A Git changeset in the Git repository.
