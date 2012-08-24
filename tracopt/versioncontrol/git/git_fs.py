@@ -232,7 +232,7 @@ class GitConnector(Component):
 
         return GitRepository(dir, params, self.log,
                              persistent_cache=self.persistent_cache,
-                             shortrev_len=self._shortrev_len,
+                             shortrev_len=self.shortrev_len,
                              rlookup_uid=rlookup_uid,
                              use_committer_id=self._use_committer_id,
                              use_committer_time=self._use_committer_time,
