@@ -62,7 +62,7 @@ class IRequestHandler(Interface):
         Note that if template processing should not occur, this method can
         simply send the response itself and not return anything.
 
-        :Since 0.13: Clearsilver templates are no longer supported.
+        :Since 1.0: Clearsilver templates are no longer supported.
         """
 
 
@@ -98,7 +98,7 @@ class IRequestFilter(Interface):
            at ClearSilver templates and the newer ones targeted at Genshi
            templates.
 
-        :Since 0.13: Clearsilver templates are no longer supported.
+        :Since 1.0: Clearsilver templates are no longer supported.
         """
 
 
@@ -562,9 +562,12 @@ class Request(object):
         self.send_header('Content-Type', mimetype)
         self.send_header('Content-Length', stat.st_size)
         self.send_header('Last-Modified', last_modified)
+        use_xsendfile = getattr(self, 'use_xsendfile', False)
+        if use_xsendfile:
+            self.send_header('X-Sendfile', os.path.abspath(path))
         self.end_headers()
 
-        if self.method != 'HEAD':
+        if not use_xsendfile and self.method != 'HEAD':
             fileobj = file(path, 'rb')
             file_wrapper = self.environ.get('wsgi.file_wrapper', _FileWrapper)
             self._response = file_wrapper(fileobj, 4096)

@@ -31,7 +31,8 @@ from trac.core import Component, ComponentManager, implements, Interface, \
                       ExtensionPoint, TracError
 from trac.db.api import (DatabaseManager, QueryContextManager, 
                          TransactionContextManager, with_transaction)
-from trac.util import copytree, create_file, get_pkginfo, lazy, makedirs
+from trac.util import copytree, create_file, get_pkginfo, lazy, makedirs, \
+                      read_file
 from trac.util.concurrency import threading
 from trac.util.text import exception_to_unicode, path_to_unicode, printerr, \
                            printout
@@ -41,6 +42,10 @@ from trac.web.href import Href
 
 __all__ = ['Environment', 'IEnvironmentSetupParticipant', 'open_environment']
 
+
+# Content of the VERSION file in the environment
+_VERSION = 'Trac Environment Version 1'
+    
 
 class ISystemInfoProvider(Interface):
     """Provider of system information, displayed in the "About Trac"
@@ -54,9 +59,15 @@ class ISystemInfoProvider(Interface):
 
 
 class IEnvironmentSetupParticipant(Interface):
-    """Extension point interface for components that need to
-    participate in the creation and upgrading of Trac environments,
-    for example to create additional database tables."""
+    """Extension point interface for components that need to participate in
+    the creation and upgrading of Trac environments, for example to create
+    additional database tables.
+    
+    Please note that `IEnvironmentSetupParticipant` instances are called in
+    arbitrary order. If your upgrades must be ordered consistently, please
+    implement the ordering in a single `IEnvironmentSetupParticipant`. See
+    the database upgrade infrastructure in Trac core for an example.
+    """
 
     def environment_created():
         """Called when a new Trac environment is created."""
@@ -81,6 +92,10 @@ class IEnvironmentSetupParticipant(Interface):
         restartable, steps of upgrade, it can decide to commit on its
         own after each successful step.
         """
+
+
+class BackupError(RuntimeError):
+    """Exception raised during an upgrade when the DB backup fails."""
 
 
 class Environment(Component, ComponentManager):
@@ -364,8 +379,13 @@ class Environment(Component, ComponentManager):
     def verify(self):
         """Verify that the provided path points to a valid Trac environment
         directory."""
-        with open(os.path.join(self.path, 'VERSION'), 'r') as fd:
-            assert fd.read(26) == 'Trac Environment Version 1'
+        try:
+            tag = read_file(os.path.join(self.path, 'VERSION')).splitlines()[0]
+            if tag != _VERSION:
+                raise Exception("Unknown Trac environment type '%s'" % tag)
+        except Exception, e:
+            raise TracError("No Trac environment found at %s\n%s"
+                            % (self.path, e))
 
     def get_db_cnx(self):
         """Return a database connection from the connection pool
@@ -526,8 +546,7 @@ class Environment(Component, ComponentManager):
         os.mkdir(os.path.join(self.path, 'plugins'))
 
         # Create a few files
-        create_file(os.path.join(self.path, 'VERSION'),
-                    'Trac Environment Version 1\n')
+        create_file(os.path.join(self.path, 'VERSION'), _VERSION + '\n')
         create_file(os.path.join(self.path, 'README'),
                     'This directory contains a Trac environment.\n'
                     'Visit http://trac.edgewall.org/ for more information.\n')
@@ -558,8 +577,8 @@ class Environment(Component, ComponentManager):
 
         :since: 0.11
 
-        :since 0.13: deprecation warning: the `db` parameter is no
-                     longer used and will be removed in version 0.14
+        :since 1.0: deprecation warning: the `db` parameter is no
+                    longer used and will be removed in version 1.1.1
         """
         rows = self.db_query("""
                 SELECT value FROM system WHERE name='%sdatabase_version'
@@ -617,8 +636,8 @@ class Environment(Component, ComponentManager):
         :param cnx: the database connection; if ommitted, a new
                     connection is retrieved
 
-        :since 0.13: deprecation warning: the `cnx` parameter is no
-                     longer used and will be removed in version 0.14
+        :since 1.0: deprecation warning: the `cnx` parameter is no
+                    longer used and will be removed in version 1.1.1
         """
         for username, name, email in self.db_query("""
                 SELECT DISTINCT s.sid, n.value, e.value
@@ -641,13 +660,13 @@ class Environment(Component, ComponentManager):
 
     def needs_upgrade(self):
         """Return whether the environment needs to be upgraded."""
-        with self.db_query as db:
-            for participant in self.setup_participants:
+        for participant in self.setup_participants:
+            with self.db_query as db:
                 if participant.environment_needs_upgrade(db):
                     self.log.warn("Component %s requires environment upgrade",
                                   participant)
                     return True
-            return False
+        return False
 
     def upgrade(self, backup=False, backup_dest=None):
         """Upgrade database.
@@ -657,15 +676,18 @@ class Environment(Component, ComponentManager):
         :return: whether the upgrade was performed
         """
         upgraders = []
-        with self.db_query as db:
-            for participant in self.setup_participants:
+        for participant in self.setup_participants:
+            with self.db_query as db:
                 if participant.environment_needs_upgrade(db):
                     upgraders.append(participant)
         if not upgraders:
             return
 
         if backup:
-            self.backup(backup_dest)
+            try:
+                self.backup(backup_dest)
+            except Exception, e:
+                raise BackupError(e)
 
         for participant in upgraders:
             self.log.info("%s.%s upgrading...", participant.__module__,
@@ -941,10 +963,14 @@ class EnvironmentAdmin(Component):
 
         try:
             self.env.upgrade(backup=no_backup is None)
-        except TracError, e:
-            raise TracError(_("Backup failed: %(msg)s.\nUse '--no-backup' to "
-                              "upgrade without doing a backup.",
-                              msg=unicode(e)))
+        except BackupError, e:
+            printerr(_("The pre-upgrade backup failed.\nUse '--no-backup' to "
+                       "upgrade without doing a backup.\n"))
+            raise e.args[0]
+        except Exception, e:
+            printerr(_("The upgrade failed. Please fix the issue and try "
+                       "again.\n"))
+            raise
 
         # Remove wiki-macros if it is empty and warn if it isn't
         wiki_macros = os.path.join(self.env.path, 'wiki-macros')

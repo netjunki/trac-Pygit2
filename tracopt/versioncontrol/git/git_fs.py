@@ -40,7 +40,7 @@ import itertools
 
 
 class GitCachedRepository(CachedRepository):
-    """Git-specific cached repository
+    """Git-specific cached repository.
 
     Passes through {display,short,normalize}_rev
     """
@@ -64,7 +64,7 @@ class GitCachedRepository(CachedRepository):
 
 
 class GitCachedChangeset(CachedChangeset):
-    """Git-specific cached changeset
+    """Git-specific cached changeset.
 
     Handles get_branches()
     """
@@ -88,7 +88,7 @@ def intersperse(sep, iterable):
     """The 'intersperse' generator takes an element and an iterable and
     intersperses that element between the elements of the iterable.
 
-    inspired by Haskell's Data.List.intersperse
+    inspired by Haskell's ``Data.List.intersperse``
     """
 
     for i, item in enumerate(iterable):
@@ -96,12 +96,14 @@ def intersperse(sep, iterable):
         yield item
 
 # helper
-def _user_time(s):
-    """return (user,timestamp) for a pygit2.Signature"""
-    user = '%s <%s>' % (s.name, s.email)
-    tz_str = '+' if s.offset >= 0 else '-'
-    tz_str += '%02d%02d' % (abs(s.offset) / 60, abs(s.offset) % 60)
-    time = datetime.fromtimestamp(float(s.time), FixedOffset(s.offset, tz_str))
+def _parse_user_time(s):
+    """Parse author or committer attribute lines and return
+    corresponding ``(user, timestamp)`` pair.
+    """
+
+    user, time, tz_str = s.rsplit(None, 2)
+    tz = FixedOffset((int(tz_str) * 6) / 10, tz_str)
+    time = datetime.fromtimestamp(float(time), tz)
     return user, time
 
 
@@ -144,7 +146,7 @@ class GitConnector(Component):
                          title=to_unicode(e), rel='nofollow')
 
     def get_wiki_syntax(self):
-        yield (r'(?:\b|!)r?[0-9a-fA-F]{%d,40}\b' % self._wiki_shortrev_len,
+        yield (r'(?:\b|!)r?[0-9a-fA-F]{%d,40}\b' % self.wiki_shortrev_len,
                lambda fmt, sha, match:
                     self._format_sha_link(fmt, sha.startswith('r')
                                           and sha[1:] or sha, sha))
@@ -155,27 +157,34 @@ class GitConnector(Component):
 
     # IRepositoryConnector methods
 
-    _shortrev_len = IntOption('git', 'shortrev_len', 7,
-        """length rev sha sums should be tried to be abbreviated to
-        (must be >= 4 and <= 40)
+    persistent_cache = BoolOption('git', 'persistent_cache', 'false',
+        """Enable persistent caching of commit tree.""")
+
+    cached_repository = BoolOption('git', 'cached_repository', 'false',
+        """Wrap `GitRepository` in `CachedRepository`.""")
+
+    shortrev_len = IntOption('git', 'shortrev_len', 7,
+        """The length at which a sha1 should be abbreviated to (must
+        be >= 4 and <= 40).
         """)
 
-    _wiki_shortrev_len = IntOption('git', 'wiki_shortrev_len', 40,
-        """minimum length of hex-string for which auto-detection as sha id is
-        performed.
-       (must be >= 4 and <= 40)
-       """)
-
-    _trac_user_rlookup = BoolOption('git', 'trac_user_rlookup', 'false',
-        """enable reverse mapping of git email addresses to trac user ids""")
-
-    _use_committer_id = BoolOption('git', 'use_committer_id', 'true',
-        """use git-committer id instead of git-author id as changeset owner
+    wiki_shortrev_len = IntOption('git', 'wikishortrev_len', 40,
+        """The minimum length of an hex-string for which
+        auto-detection as sha1 is performed (must be >= 4 and <= 40).
         """)
 
-    _use_committer_time = BoolOption('git', 'use_committer_time', 'true',
-        """use git-committer-author timestamp instead of git-author timestamp
-        as changeset timestamp
+    trac_user_rlookup = BoolOption('git', 'trac_user_rlookup', 'false',
+        """Enable reverse mapping of git email addresses to trac user ids
+        (costly if you have many users).""")
+
+    use_committer_id = BoolOption('git', 'use_committer_id', 'true',
+        """Use git-committer id instead of git-author id for the
+        changeset ''Author'' field.
+        """)
+
+    use_committer_time = BoolOption('git', 'use_committer_time', 'true',
+        """Use git-committer timestamp instead of git-author timestamp
+        for the changeset ''Timestamp'' field.
         """)
 
 
@@ -186,21 +195,21 @@ class GitConnector(Component):
         """GitRepository factory method"""
         assert type == 'git'
 
-        if not (4 <= self._shortrev_len <= 40):
-            raise TracError("shortrev_len must be withing [4..40]")
+        if not (4 <= self.shortrev_len <= 40):
+            raise TracError("[git] shortrev_len setting must be within [4..40]")
 
-        if not (4 <= self._wiki_shortrev_len <= 40):
-            raise TracError("wiki_shortrev_len must be withing [4..40]")
+        if not (4 <= self.wiki_shortrev_len <= 40):
+            raise TracError("[git] wikishortrev_len must be within [4..40]")
 
         if not self._version:
             raise TracError("pygit2 is not available")
 
-        if self._trac_user_rlookup:
+        if self.trac_user_rlookup:
             def rlookup_uid(email):
-                """reverse map 'real name <user@domain.tld>' addresses to trac
-                user ids
+                """Reverse map 'real name <user@domain.tld>' addresses to trac
+                user ids.
 
-                returns None if lookup failed
+                :return: `None` if lookup failed
                 """
 
                 try:
@@ -222,12 +231,20 @@ class GitConnector(Component):
                 return None
 
         return GitRepository(dir, params, self.log,
-                             persistent_cache=False,
+                             persistent_cache=self.persistent_cache,
                              shortrev_len=self._shortrev_len,
                              rlookup_uid=rlookup_uid,
                              use_committer_id=self._use_committer_id,
                              use_committer_time=self._use_committer_time,
                              )
+
+        if self.cached_repository:
+            repos = GitCachedRepository(self.env, repos, self.log)
+            self.log.debug("enabled CachedRepository for '%s'" % dir)
+        else:
+            self.log.debug("disabled CachedRepository for '%s'" % dir)
+
+        return repos
 
 
 class CsetPropertyRenderer(Component):
@@ -329,7 +346,7 @@ class GitRepository(Repository):
         self.logger = log
         self.gitrepo = path
         self.params = params
-        self._shortrev_len = max(4, min(shortrev_len, 40))
+        self.shortrev_len = max(4, min(shortrev_len, 40))
         self.rlookup_uid = rlookup_uid
         self._use_committer_time = use_committer_time
         self._use_committer_id = use_committer_id
@@ -378,7 +395,7 @@ class GitRepository(Repository):
 
     def short_rev(self, rev):
         return self.git.shortrev(self.normalize_rev(rev),
-                                 min_len=self._shortrev_len)
+                                 min_len=self.shortrev_len)
 
     def get_node(self, path, rev=None, historian=None):
         return GitNode(self, path, rev, self.log, None, historian)
@@ -613,27 +630,51 @@ class GitChangeset(Changeset):
 #        if _children:
 #            props['children'] = _children
 
-        if repos._use_committer_time:
-            _, time_ = _user_time(props.committer)
-        else:
-            _, time_ = _user_time(props.author)
+        committer, author = self._get_committer_and_author()
+        # use 1st author/committer as changeset owner/timestamp
+        c_user = a_user = c_time = a_time = None
+        if committer:
+            c_user, c_time = _parse_user_time(committer)
+        if author:
+            a_user, a_time = _parse_user_time(author)
 
-        if repos._use_committer_id:
-            user_, _ = _user_time(props.committer)
+        if repos.use_committer_time:
+            time = c_time or a_time
         else:
-            user_, _ = _user_time(props.author)
+            time = a_time or c_time
+
+        if repos.use_committer_id:
+            user = c_user or a_user
+        else:
+            user = a_user or c_user
 
         # try to resolve email address to trac uid
-        user_ = repos.rlookup_uid(user_) or user_
+        user = repos.rlookup_uid(user) or user
 
-        Changeset.__init__(self, repos, rev=sha, message=props.message,
-                           author=user_, date=time_)
+        Changeset.__init__(self, repos, rev=sha, message=msg, author=user,
+                           date=time)
+
+    def _get_committer_and_author(self):
+        committer = author = None
+        if 'committer' in self.props:
+            committer = self.props['committer'][0]
+        if 'author' in self.props:
+            author = self.props['author'][0]
+        return committer, author
 
     def get_properties(self):
         properties = {}
 
-        if len(self.props.parents):
-            properties['Parents'] = [c.hex for c in self.props.parents]
+        if 'parent' in self.props:
+            properties['Parents'] = self.props['parent']
+
+        if 'children' in self.props:
+            properties['Children'] = self.props['children']
+
+        committer, author = self._get_committer_and_author()
+        if author != committer:
+            properties['git-committer'] = _parse_user_time(committer)
+            properties['git-author'] = _parse_user_time(author)
 
         if len(self.props.children):
             properties['Children'] = [c.hex for c in self.props.children]

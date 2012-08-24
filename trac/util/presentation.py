@@ -19,9 +19,13 @@ tasks such as grouping or pagination.
 from math import ceil
 import re
 
-__all__ = ['classes', 'first_last', 'group', 'istext', 'prepared_paginate', 
-           'paginate', 'Paginator']
+__all__ = ['captioned_button', 'classes', 'first_last', 'group', 'istext',
+           'prepared_paginate', 'paginate', 'Paginator']
 
+
+def captioned_button(req, symbol, text):
+    return symbol if req.session.get('ui.use_symbols') \
+        else u'%s %s' % (symbol, text)
 
 def classes(*args, **kwargs):
     """Helper function for dynamically assembling a list of CSS class names
@@ -298,12 +302,12 @@ try:
         return _js_quote_re.sub(replace, text)
 
 except ImportError:
-    from trac.util.text import javascript_quote
+    from trac.util.text import to_js_string
     
     def to_json(value):
         """Encode `value` to JSON."""
         if isinstance(value, basestring):
-            return '"%s"' % javascript_quote(value)
+            return to_js_string(value)
         elif value is None:
             return 'null'
         elif value is False:

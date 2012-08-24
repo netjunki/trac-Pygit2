@@ -1,5 +1,7 @@
 = The Trac Configuration File =
 
+ ''[Note To Editors] Please discuss documentation changes in the [#Discussion] section. Even better, send us [TracDev/SubmittingPatches documentation patches] against the ''code'' (i.e. where the configuration entries are documented), either on Trac-dev or on new tickets. ''
+
 [[TracGuideToc]]
 [[PageOutline]]
 
@@ -28,6 +30,16 @@ Note that the templates found in the `templates/` directory of the TracEnvironme
 
 This is a brief reference of available configuration options, and their default settings.
 
+ ''Note that the [bitten], [spam-filter] and [vote] sections below are added by plugins enabled on this Trac, and therefore won't be part of a default installation.''
+
+{{{ 
+#!comment 
+Suggest your documentation fixes in the Discussion section at  
+the bottom of the page, or better send us patches against 
+the corresponding docstrings you'll find in the code!
+
+Please don't waste your time by editing the HTML code below, changes won't be picked up. 
+}}}
 [[TracIni]]
 
 == Reference for special sections

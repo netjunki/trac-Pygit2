@@ -3,7 +3,7 @@
 # Copyright (C) 2004-2010 Edgewall Software
 # Copyright (C) 2004 Daniel Lundin <daniel@edgewall.com>
 # Copyright (C) 2005-2006 Christopher Lenz <cmlenz@gmx.de>
-# Copyright (C) 2006-2007 Christian Boos <cboos@neuf.fr>
+# Copyright (C) 2006-2007 Christian Boos <cboos@edgewall.org>
 # All rights reserved.
 #
 # This software is licensed as described in the file COPYING, which
@@ -16,7 +16,7 @@
 #
 # Author: Daniel Lundin <daniel@edgewall.com>
 #         Christopher Lenz <cmlenz@gmx.de>
-#         Christian Boos <cboos@neuf.fr>
+#         Christian Boos <cboos@edgewall.org>
 
 """
 File metadata management
@@ -131,7 +131,7 @@ class RenderingContext(object):
 
     @staticmethod
     def from_request(*args, **kwargs):
-        """:deprecated: since 0.13, use `web_context` instead."""
+        """:deprecated: since 1.0, use `web_context` instead."""
         from trac.web.chrome import web_context
         return web_context(*args, **kwargs)
 
