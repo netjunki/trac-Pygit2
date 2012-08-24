@@ -234,8 +234,8 @@ class GitConnector(Component):
                              persistent_cache=self.persistent_cache,
                              shortrev_len=self.shortrev_len,
                              rlookup_uid=rlookup_uid,
-                             use_committer_id=self._use_committer_id,
-                             use_committer_time=self._use_committer_time,
+                             use_committer_id=self.use_committer_id,
+                             use_committer_time=self.use_committer_time,
                              )
 
         if self.cached_repository:
@@ -348,8 +348,8 @@ class GitRepository(Repository):
         self.params = params
         self.shortrev_len = max(4, min(shortrev_len, 40))
         self.rlookup_uid = rlookup_uid
-        self._use_committer_time = use_committer_time
-        self._use_committer_id = use_committer_id
+        self.use_committer_time = use_committer_time
+        self.use_committer_id = use_committer_id
         self.git = pygit2.Repository(path)
         self.heads = [self.git.lookup_reference(ref).resolve() for ref in \
                       self.git.listall_references() if \
