@@ -683,8 +683,8 @@ class GitChangeset(Changeset):
         if len(self.props.children):
             properties['Children'] = [c.hex for c in self.props.children]
 
-        properties['git-committer'] = _user_time(self.props.committer)
-        properties['git-author'] = _user_time(self.props.author)
+        properties['git-committer'] = _parse_user_time(self.props.committer)
+        properties['git-author'] = _parse_user_time(self.props.author)
         properties['Branches'] = [branch.name.split('refs/heads/', 1) \
                                   for branch in heads]
         return properties
