@@ -359,9 +359,9 @@ class GitRepository(Repository):
         self.tags = [self.git.lookup_reference(ref).resolve() for ref in \
                       self.git.listall_references() if \
                       ref.startswith('refs/tags/')]
-        self.root = itertools.slice(self.git.walk(self.heads[0].oid,
+        self.root = itertools.islice(self.git.walk(self.heads[0].oid,
                                                   pygit2.GIT_SORT_TIME | \
-                                                  pygit2.GIT_SORT_REVERSE), 1)[0]
+                                                  pygit2.GIT_SORT_REVERSE), 1).next()
         Repository.__init__(self, 'git:'+path, self.params, log)
 
     def close(self):
