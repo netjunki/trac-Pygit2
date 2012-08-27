@@ -1,7 +1,6 @@
 # -*- coding: utf-8 -*-
 #
 # Copyright (C) 2012 Edgewall Software
-# Copyright (C) 2012 Peter Stuge <peter@stuge.se>
 # Copyright (C) 2006-2011, Herbert Valerio Riedel <hvr@gnu.org>
 # All rights reserved.
 #
@@ -34,9 +33,7 @@ from trac.versioncontrol.web_ui import IPropertyRenderer
 from trac.web.chrome import Chrome
 from trac.wiki import IWikiSyntaxProvider
 
-import pygit2
-import pkg_resources
-import itertools
+from tracopt.versioncontrol.git import PyGIT
 
 
 class GitCachedRepository(CachedRepository):
@@ -112,9 +109,21 @@ class GitConnector(Component):
     implements(IRepositoryConnector, IWikiSyntaxProvider)
 
     def __init__(self):
-        self._version = pkg_resources.get_distribution('pygit2').version
-        self.log.info("using pygit2 version %s" % self._version)
-        self.env.systeminfo.append(('PYGIT2', self._version))
+        self._version = None
+
+        try:
+            self._version = PyGIT.Storage.git_version(git_bin=self.git_bin)
+        except PyGIT.GitError, e:
+            self.log.error("GitError: " + str(e))
+
+        if self._version:
+            self.log.info("detected GIT version %s" % self._version['v_str'])
+            self.env.systeminfo.append(('GIT', self._version['v_str']))
+            if not self._version['v_compatible']:
+                self.log.error("GIT version %s installed not compatible"
+                               "(need >= %s)" %
+                               (self._version['v_str'],
+                                self._version['v_min_str']))
 
     # IWikiSyntaxProvider methods
 
@@ -187,6 +196,13 @@ class GitConnector(Component):
         for the changeset ''Timestamp'' field.
         """)
 
+    git_fs_encoding = Option('git', 'git_fs_encoding', 'utf-8',
+        """Define charset encoding of paths within git repositories.""")
+
+    git_bin = PathOption('git', 'git_bin', '/usr/bin/git',
+        """Path to git executable (relative to the Trac configuration folder,
+        so better use an absolute path here).""")
+
 
     def get_supported_types(self):
         yield ('git', 8)
@@ -202,7 +218,12 @@ class GitConnector(Component):
             raise TracError("[git] wikishortrev_len must be within [4..40]")
 
         if not self._version:
-            raise TracError("pygit2 is not available")
+            raise TracError("GIT backend not available")
+        elif not self._version['v_compatible']:
+            raise TracError("GIT version %s installed not compatible"
+                            "(need >= %s)" %
+                            (self._version['v_str'],
+                             self._version['v_min_str']))
 
         if self.trac_user_rlookup:
             def rlookup_uid(email):
@@ -230,13 +251,15 @@ class GitConnector(Component):
             def rlookup_uid(_):
                 return None
 
-        return GitRepository(dir, params, self.log,
-                             persistent_cache=self.persistent_cache,
-                             shortrev_len=self.shortrev_len,
-                             rlookup_uid=rlookup_uid,
-                             use_committer_id=self.use_committer_id,
-                             use_committer_time=self.use_committer_time,
-                             )
+        repos = GitRepository(dir, params, self.log,
+                              persistent_cache=self.persistent_cache,
+                              git_bin=self.git_bin,
+                              git_fs_encoding=self.git_fs_encoding,
+                              shortrev_len=self.shortrev_len,
+                              rlookup_uid=rlookup_uid,
+                              use_committer_id=self.use_committer_id,
+                              use_committer_time=self.use_committer_time,
+                              )
 
         if self.cached_repository:
             repos = GitCachedRepository(self.env, repos, self.log)
@@ -337,6 +360,8 @@ class GitRepository(Repository):
 
     def __init__(self, path, params, log,
                  persistent_cache=False,
+                 git_bin='git',
+                 git_fs_encoding='utf-8',
                  shortrev_len=7,
                  rlookup_uid=lambda _: None,
                  use_committer_id=False,
@@ -350,34 +375,22 @@ class GitRepository(Repository):
         self.rlookup_uid = rlookup_uid
         self.use_committer_time = use_committer_time
         self.use_committer_id = use_committer_id
-        self.git = pygit2.Repository(path)
-        self.heads = [self.git.lookup_reference(ref).resolve() for ref in \
-                      self.git.listall_references() if \
-                      ref.startswith('refs/heads/')]
-        if not self.heads:
-            self.heads = [self.git.lookup_reference('HEAD').resolve()]
-        self.tags = [self.git.lookup_reference(ref).resolve() for ref in \
-                      self.git.listall_references() if \
-                      ref.startswith('refs/tags/')]
-        self.root = itertools.islice(self.git.walk(self.heads[0].oid,
-                                                  pygit2.GIT_SORT_TIME | \
-                                                  pygit2.GIT_SORT_REVERSE), 1).next()
+
+        self.git = PyGIT.StorageFactory(path, log, not persistent_cache,
+                                        git_bin=git_bin,
+                                        git_fs_encoding=git_fs_encoding) \
+                        .getInstance()
+
         Repository.__init__(self, 'git:'+path, self.params, log)
 
     def close(self):
         self.git = None
 
     def get_youngest_rev(self):
-        time = 0
-        commit = None
-        for head in self.heads:
-            if self.git[head.oid].committer.time > time:
-                time = self.git[head.oid].committer.time
-                commit = head.hex
-        return commit
+        return self.git.youngest_rev()
 
     def get_oldest_rev(self):
-        return self.root.hex
+        return self.git.oldest_rev()
 
     def normalize_path(self, path):
         return path and path.strip('/') or '/'
@@ -401,20 +414,18 @@ class GitRepository(Repository):
         return GitNode(self, path, rev, self.log, None, historian)
 
     def get_quickjump_entries(self, rev):
-        for h in self.heads:
-            yield 'branches', h.name, '/', h.hex
-        for t in self.tags:
-            yield 'tags', t.name, '/', t.hex
+        for bname, bsha in self.git.get_branches():
+            yield 'branches', bname, '/', bsha
+        for t in self.git.get_tags():
+            yield 'tags', t, '/', t
 
     def get_path_url(self, path, rev):
         return self.params.get('url')
 
     def get_changesets(self, start, stop):
-        for commit in self.git.walk(self.root.oid,
-                                    pygit2.GIT_SORT_TIME | \
-                                    pygit2.GIT_SORT_REVERSE):
-            if to_timestamp(start) <= commit.time <= to_timestamp(stop):
-                yield self.get_changeset(commit.hex)
+        for rev in self.git.history_timerange(to_timestamp(start),
+                                              to_timestamp(stop)):
+            yield self.get_changeset(rev)
 
     def get_changeset(self, rev):
         """GitChangeset factory method"""
@@ -605,6 +616,7 @@ class GitNode(Node):
 
         return ts
 
+
 class GitChangeset(Changeset):
     """A Git changeset in the Git repository.
 
@@ -623,16 +635,18 @@ class GitChangeset(Changeset):
     def __init__(self, repos, sha):
         if sha is None:
             raise NoSuchChangeset(sha)
-
+        
         try:
-            self.props = repos.git[repos.git.lookup_reference(sha).resolve()]
-        except KeyError:
+            msg, props = repos.git.read_commit(sha)
+        except PyGIT.GitErrorSha:
             raise NoSuchChangeset(sha)
 
-#        assert 'children' not in props
-#        _children = list(repos.git.children(sha))
-#        if _children:
-#            props['children'] = _children
+        self.props = props
+
+        assert 'children' not in props
+        _children = list(repos.git.children(sha))
+        if _children:
+            props['children'] = _children
 
         committer, author = self._get_committer_and_author()
         # use 1st author/committer as changeset owner/timestamp
@@ -680,13 +694,11 @@ class GitChangeset(Changeset):
             properties['git-committer'] = _parse_user_time(committer)
             properties['git-author'] = _parse_user_time(author)
 
-        if len(self.props.children):
-            properties['Children'] = [c.hex for c in self.props.children]
+        branches = list(self.repos.git.get_branch_contains(self.rev,
+                                                           resolve=True))
+        if branches:
+            properties['Branches'] = branches
 
-        properties['git-committer'] = _parse_user_time(self.props.committer)
-        properties['git-author'] = _parse_user_time(self.props.author)
-        properties['Branches'] = [branch.name.split('refs/heads/', 1) \
-                                  for branch in heads]
         return properties
 
     def get_changes(self):
