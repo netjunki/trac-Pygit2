@@ -33,7 +33,7 @@ from trac.versioncontrol.web_ui import IPropertyRenderer
 from trac.web.chrome import Chrome
 from trac.wiki import IWikiSyntaxProvider
 
-from tracopt.versioncontrol.git import PyGIT2
+from tracopt.versioncontrol.git import PyGIT2 as PyGIT
 
 
 class GitCachedRepository(CachedRepository):
